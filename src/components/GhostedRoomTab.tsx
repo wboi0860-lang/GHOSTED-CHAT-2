@@ -44,7 +44,9 @@ import {
   fetchMyChatConversations,
   formatDeletesInCountdown,
   formatLastActiveText,
+  getCachedPersonalChat,
   getFriendRequestBetween,
+  getLocalChatConversationsFast,
   isUserOnline,
   likeIdea,
   loadIdeas,
@@ -60,6 +62,8 @@ import {
   subscribeToFriendRequests,
   subscribeToIdeas,
   subscribeToMapSessions,
+  subscribeToPersonalChatActivity,
+  warmChatChannels,
 } from '../services/roomService';
 import { GhostAvatarView } from './GhostAvatarView';
 import { getSortedRoomCode, normalizeGhostNumber } from '../utils/ghostNumber';
@@ -105,7 +109,9 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
   const [outgoingRequests, setOutgoingRequests] = useState<FriendRequestRecord[]>([]);
   const [acceptedContacts, setAcceptedContacts] = useState<GhostRoomProfile[]>([]);
 
-  const [conversations, setConversations] = useState<ConversationPreview[]>([]);
+  const [conversations, setConversations] = useState<ConversationPreview[]>(() =>
+    getLocalChatConversationsFast(profile.ghost_number)
+  );
   const [activeRoom, setActiveRoom] = useState<ChatRoomRow | null>(null);
   const [activeMapSession, setActiveMapSession] = useState<MapSessionData | null>(null);
   const [chatError, setChatError] = useState('');
@@ -209,6 +215,9 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
     loadConversations();
     loadFriendRequestsAndContacts();
     refreshIdeas();
+    const unsubChatActivity = subscribeToPersonalChatActivity(() => {
+      setConversations(getLocalChatConversationsFast(profile.ghost_number));
+    });
     const unsubReqs = subscribeToFriendRequests(profile.ghost_number, () => {
       loadFriendRequestsAndContacts();
       onRefreshProfile();
@@ -221,6 +230,7 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
     }, 60000);
     return () => {
       clearInterval(ideasExpiryTimer);
+      unsubChatActivity();
       unsubReqs();
       unsubIdeas();
     };
@@ -244,17 +254,30 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
     }
   };
 
-  const handleLikeIdea = async (ideaId: string, currentLikes: number) => {
-    if (likingIdeaId === ideaId) return;
-    setLikingIdeaId(ideaId);
+  const handleLikeIdea = async (idea: IdeaRecord) => {
+    const myGh = normalizeGhostNumber(profile.ghost_number);
+    const ownerGh = normalizeGhostNumber(idea.ghost_number);
+    if (ownerGh && ownerGh === myGh) return;
+    if (Array.isArray(idea.liked_by) && idea.liked_by.includes(myGh)) return;
+    if (likingIdeaId === idea.id) return;
+
+    setLikingIdeaId(idea.id);
     setIdeasError('');
     setIdeas((prev) =>
-      prev.map((idea) => (idea.id === ideaId ? { ...idea, likes: currentLikes + 1 } : idea))
+      prev.map((item) =>
+        item.id === idea.id
+          ? {
+              ...item,
+              likes: item.likes + 1,
+              liked_by: Array.from(new Set([...(item.liked_by || []), myGh])),
+            }
+          : item
+      )
     );
     try {
-      const updated = await likeIdea(ideaId, currentLikes);
+      const updated = await likeIdea(idea.id, idea.likes, myGh);
       if (updated) {
-        setIdeas((prev) => prev.map((idea) => (idea.id === ideaId ? updated : idea)));
+        setIdeas((prev) => prev.map((item) => (item.id === idea.id ? updated : item)));
       }
     } catch (err: any) {
       setIdeasError(err?.message || 'Could not like idea.');
@@ -276,6 +299,11 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
     let unsubChat = () => {};
     let unsubMap = () => {};
     const roomCode = getSortedRoomCode(profile.ghost_number, selectedChatPeer.ghost_number);
+    const cachedRoom = getCachedPersonalChat(profile.ghost_number, selectedChatPeer.ghost_number);
+    if (cachedRoom) {
+      setActiveRoom(cachedRoom);
+    }
+    warmChatChannels(profile.ghost_number, selectedChatPeer.ghost_number);
 
     fetchMapSessionByRoom(roomCode).then((ms) => {
       if (!cancelled) setActiveMapSession(ms);
@@ -287,21 +315,21 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
       });
     });
 
+    unsubChat = subscribeToChatRoom(roomCode, (updated) => {
+      if (cancelled) return;
+      if (!updated) {
+        onSelectChatPeer(null);
+        setConversations(getLocalChatConversationsFast(profile.ghost_number));
+        return;
+      }
+      setActiveRoom(updated);
+    });
+
     openOrCreateChatRoom(profile.ghost_number, selectedChatPeer.ghost_number)
       .then((room) => {
         if (cancelled) return;
         setActiveRoom(room);
         setChatError('');
-        onRefreshProfile();
-        loadConversations();
-        unsubChat = subscribeToChatRoom(room.room_code, (updated) => {
-          if (!updated) {
-            onSelectChatPeer(null);
-            loadConversations();
-            return;
-          }
-          setActiveRoom(updated);
-        });
       })
       .catch((err: any) => {
         if (!cancelled) {
@@ -317,7 +345,10 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
   }, [selectedChatPeer?.ghost_number, profile.ghost_number]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!activeRoom?.messages.length) return;
+    requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    });
   }, [activeRoom?.messages.length]);
 
   const handleSearch = async (e: React.FormEvent) => {
@@ -393,23 +424,31 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
       setSearchError('That is your own GH-Number.');
       return;
     }
-    const confirmed = await areUsersFriends(profile.ghost_number, peer.ghost_number);
-    if (!confirmed) {
-      setSearchError('Chat is blocked until your friend request is accepted.');
-      return;
+    const alreadyAccepted = acceptedContacts.some((c) => c.ghost_number === peer.ghost_number);
+    if (!alreadyAccepted) {
+      const confirmed = await areUsersFriends(profile.ghost_number, peer.ghost_number);
+      if (!confirmed) {
+        setSearchError('Chat is blocked until your friend request is accepted.');
+        return;
+      }
     }
+    warmChatChannels(profile.ghost_number, peer.ghost_number);
     onSelectChatPeer(peer);
     onChatOpened();
   };
 
   const handleOpenByGh = async (gh: string, fallbackName?: string, fallbackPic?: string) => {
-    const confirmed = await areUsersFriends(profile.ghost_number, gh);
-    if (!confirmed) {
-      setSearchError(`Send and accept a Friend Request with ${gh} before chatting.`);
-      return;
+    const contactMatch = acceptedContacts.find((c) => c.ghost_number === gh);
+    const hasLocalRoom = Boolean(getCachedPersonalChat(profile.ghost_number, gh));
+    if (!contactMatch && !hasLocalRoom) {
+      const confirmed = await areUsersFriends(profile.ghost_number, gh);
+      if (!confirmed) {
+        setSearchError(`Send and accept a Friend Request with ${gh} before chatting.`);
+        return;
+      }
     }
-    const found = await searchByGhostNumber(gh).catch(() => null);
-    const target: GhostRoomProfile = found || {
+    warmChatChannels(profile.ghost_number, gh);
+    const target: GhostRoomProfile = contactMatch || {
       ghost_number: gh,
       display_name: fallbackName || gh,
       profile_pic: fallbackPic || '',
@@ -417,6 +456,14 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
     };
     onSelectChatPeer(target);
     onChatOpened();
+
+    if (!contactMatch) {
+      searchByGhostNumber(gh)
+        .then((found) => {
+          if (found) onSelectChatPeer(found);
+        })
+        .catch(() => {});
+    }
   };
 
   const handleSendText = async (e: React.FormEvent) => {
@@ -432,7 +479,6 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
         text,
       });
       setActiveRoom(updated);
-      loadConversations();
       onMessageSent?.();
     } catch (err: any) {
       setChatError(err?.message || 'Failed to send.');
@@ -1623,40 +1669,69 @@ export const GhostedRoomTab: React.FC<GhostedRoomTabProps> = ({
           </div>
         ) : (
           <div className="space-y-2.5">
-            {ideas.map((idea) => (
-              <div key={idea.id} className="idea-card space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs font-mono font-bold text-cyan-300">
-                    <b>{idea.ghost_number}</b>
-                  </p>
-                  <div className="flex items-center space-x-2 text-[10px] text-zinc-400 tabular-nums">
-                    <span className="inline-flex items-center space-x-1 text-amber-300/90">
-                      <Clock className="w-3 h-3" />
-                      <span>{formatDeletesInCountdown(idea.expires_at, idea.created_at)}</span>
-                    </span>
-                    <span className="text-zinc-500">
-                      {new Date(idea.created_at).toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </span>
+            {ideas.map((idea) => {
+              const myGh = normalizeGhostNumber(profile.ghost_number);
+              const isOwnIdea = normalizeGhostNumber(idea.ghost_number) === myGh;
+              const hasLiked = Array.isArray(idea.liked_by) && idea.liked_by.includes(myGh);
+              const likeDisabled = isOwnIdea || hasLiked || likingIdeaId === idea.id;
+              return (
+                <div key={idea.id} className="idea-card space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-mono font-bold text-cyan-300">
+                      <b>{idea.ghost_number}</b>
+                    </p>
+                    <div className="flex items-center space-x-2 text-[10px] text-zinc-400 tabular-nums">
+                      <span className="inline-flex items-center space-x-1 text-amber-300/90">
+                        <Clock className="w-3 h-3" />
+                        <span>{formatDeletesInCountdown(idea.expires_at, idea.created_at)}</span>
+                      </span>
+                      <span className="text-zinc-500">
+                        {new Date(idea.created_at).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-sm text-white leading-relaxed break-words">{idea.text}</p>
+                  <div className="pt-1 flex items-center justify-between">
+                    <button
+                      type="button"
+                      disabled={likeDisabled}
+                      onClick={() => handleLikeIdea(idea)}
+                      title={
+                        isOwnIdea
+                          ? 'You cannot like your own idea'
+                          : hasLiked
+                          ? 'You can only like each idea once'
+                          : 'Like this idea'
+                      }
+                      className={`min-h-[36px] px-3 rounded-xl text-xs font-bold inline-flex items-center space-x-1.5 border ${
+                        isOwnIdea
+                          ? 'bg-white/5 border-white/10 text-zinc-400 cursor-not-allowed'
+                          : hasLiked
+                          ? 'bg-rose-500/25 border-rose-400/60 text-rose-200 cursor-default'
+                          : 'bg-rose-500/15 hover:bg-rose-500/25 border-rose-500/30 text-rose-200 cursor-pointer'
+                      } disabled:opacity-75`}
+                    >
+                      <Heart
+                        className={`w-3.5 h-3.5 ${
+                          isOwnIdea ? 'text-zinc-400' : 'fill-rose-400 text-rose-400'
+                        }`}
+                      />
+                      <span>
+                        {isOwnIdea
+                          ? `Your Idea · ❤️ ${idea.likes}`
+                          : hasLiked
+                          ? `❤️ Liked ${idea.likes}`
+                          : `❤️ Like ${idea.likes}`}
+                      </span>
+                    </button>
+                    <span className="text-[10px] font-mono text-zinc-500">Auto-deletes in 24h</span>
                   </div>
                 </div>
-                <p className="text-sm text-white leading-relaxed break-words">{idea.text}</p>
-                <div className="pt-1 flex items-center justify-between">
-                  <button
-                    type="button"
-                    disabled={likingIdeaId === idea.id}
-                    onClick={() => handleLikeIdea(idea.id, idea.likes)}
-                    className="min-h-[36px] px-3 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-200 text-xs font-bold inline-flex items-center space-x-1.5 cursor-pointer disabled:opacity-60"
-                  >
-                    <Heart className="w-3.5 h-3.5 fill-rose-400 text-rose-400" />
-                    <span>❤️ Like {idea.likes}</span>
-                  </button>
-                  <span className="text-[10px] font-mono text-zinc-500">Auto-deletes in 24h</span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

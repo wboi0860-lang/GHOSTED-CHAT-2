@@ -250,6 +250,7 @@ export interface IdeaRecord {
   ghost_number: string;
   text: string;
   likes: number;
+  liked_by?: string[];
   created_at: string;
   expires_at?: string;
 }

@@ -19,6 +19,7 @@ import {
   startGhostCallRow,
   subscribeToFriendRequests,
   subscribeToMyCallRow,
+  subscribeToUserInbox,
   updateCallStatusBoth,
   updatePresenceHeartbeat,
 } from './services/roomService';
@@ -182,12 +183,14 @@ export default function App() {
         setPendingFriendCount(res.incomingPending.length);
       });
     });
+    const unsubInbox = subscribeToUserInbox(gh);
 
     return () => {
       clearInterval(heartbeatTimer);
       clearInterval(sweepTimer);
       clearInterval(tickTimer);
       unsubFriends();
+      unsubInbox();
     };
   }, [profile?.ghost_number]);
 

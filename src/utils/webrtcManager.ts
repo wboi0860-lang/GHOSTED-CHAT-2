@@ -1,6 +1,7 @@
 import { supabase } from '../supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { normalizeGhostNumber } from './ghostNumber';
+import { apiUrl } from './api';
 
 export interface WebRTCConnectionHandlers {
   onLocalStream?: (stream: MediaStream) => void;
@@ -10,7 +11,7 @@ export interface WebRTCConnectionHandlers {
 
 async function fetchRtcConfig(): Promise<RTCConfiguration> {
   try {
-    const res = await fetch('/api/turn-credentials');
+    const res = await fetch(apiUrl('/api/turn-credentials'));
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {

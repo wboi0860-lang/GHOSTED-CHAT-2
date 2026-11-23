@@ -29,6 +29,7 @@ import {
   normalizeGhostNumber,
 } from '../utils/ghostNumber';
 import { generateRandomGhostAvatar, serializeGhostAvatar } from '../utils/ghostAvatar';
+import { apiUrl } from '../utils/api';
 
 const STORAGE_ACTIVE_GH = 'ghosted_active_gh_number';
 const STORAGE_PROFILE_CACHE = 'ghosted_room_profile_cache';
@@ -266,7 +267,7 @@ export async function saveLiveGhostNumberRecord(params: {
   const status = params.status || 'active';
 
   try {
-    await fetch('/api/gh-number-live', {
+    await fetch(apiUrl('/api/gh-number-live'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -369,7 +370,7 @@ export async function isEmailInDeletedBlocklist(rawEmail: string): Promise<boole
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch('/api/check-deleted-email', {
+    const res = await fetch(apiUrl('/api/check-deleted-email'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email }),
@@ -448,7 +449,7 @@ export async function createGhostAccountWithEmail(params: {
 
   let res: Response;
   try {
-    res = await fetch('/api/accounts/signup', {
+    res = await fetch(apiUrl('/api/accounts/signup'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -513,7 +514,7 @@ export async function signInWithEmail(
 
   let res: Response;
   try {
-    res = await fetch('/api/accounts/signin', {
+    res = await fetch(apiUrl('/api/accounts/signin'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -569,7 +570,7 @@ export async function signOutGhostAccount(params?: {
 
   // Update row in `ghosted_number_room`: status = signed_out. Do NOT delete row, GH-Number stays locked!
   try {
-    await fetch('/api/accounts/signout', {
+    await fetch(apiUrl('/api/accounts/signout'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, ghostNumber }),
@@ -719,7 +720,7 @@ export async function deleteAccountPermanently(params: {
 
   // 2. Call server endpoint to delete ALL Supabase records (all tables + Auth user + deleted_emails)
   try {
-    await fetch('/api/delete-account', {
+    await fetch(apiUrl('/api/delete-account'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -810,9 +811,26 @@ export async function deleteAccountPermanently(params: {
   return { deletedEmail };
 }
 
+const ghostProfileCache = new Map<string, { profile: GhostRoomProfile | null; cachedAt: number }>();
+const GHOST_PROFILE_CACHE_TTL_MS = 15000;
+
+export function invalidateGhostProfileCache(rawGh?: string): void {
+  if (!rawGh) {
+    ghostProfileCache.clear();
+    return;
+  }
+  const gh = normalizeGhostNumber(rawGh);
+  if (gh) ghostProfileCache.delete(gh);
+}
+
 export async function fetchGhostProfile(rawGh: string): Promise<GhostRoomProfile | null> {
   const gh = normalizeGhostNumber(rawGh);
   if (!gh) return null;
+
+  const cached = ghostProfileCache.get(gh);
+  if (cached && Date.now() - cached.cachedAt < GHOST_PROFILE_CACHE_TTL_MS) {
+    return cached.profile;
+  }
 
   const { data, error } = await supabase
     .from('ghosted_room')
@@ -821,7 +839,9 @@ export async function fetchGhostProfile(rawGh: string): Promise<GhostRoomProfile
     .maybeSingle();
 
   if (error || !data) return null;
-  return mapProfileRow(data);
+  const mapped = mapProfileRow(data);
+  ghostProfileCache.set(gh, { profile: mapped, cachedAt: Date.now() });
+  return mapped;
 }
 
 export async function updatePresenceHeartbeat(ghostNumber: string): Promise<void> {
@@ -905,7 +925,7 @@ export async function updateGhostProfile(
   });
 
   if (patch.display_name !== undefined) {
-    fetch('/api/accounts/update-username', {
+    fetch(apiUrl('/api/accounts/update-username'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -916,6 +936,7 @@ export async function updateGhostProfile(
     }).catch(() => {});
   }
 
+  ghostProfileCache.set(mapped.ghost_number, { profile: mapped, cachedAt: Date.now() });
   saveLocalGhostSession(mapped);
   return mapped;
 }
@@ -961,7 +982,7 @@ export async function fetchVipStatusMap(
   if (uniqueGhs.length === 0) return map;
 
   try {
-    const res = await fetch('/api/vip/status', {
+    const res = await fetch(apiUrl('/api/vip/status'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ghostNumbers: uniqueGhs }),
@@ -1033,7 +1054,7 @@ export async function searchByGhostNumber(query: string): Promise<GhostRoomProfi
 
   // 1. Live check via `/api/gh-number-check` (checks `ghosted_room` + `vip_table` + `vip_room`)
   try {
-    const res = await fetch('/api/gh-number-check', {
+    const res = await fetch(apiUrl('/api/gh-number-check'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ghostNumber: gh }),
@@ -1298,13 +1319,37 @@ interface LocalPersonalChatData {
   last_active: string;
 }
 
+const personalChatMemoryCache = new Map<string, LocalPersonalChatData>();
+const roomAccessCache = new Map<string, { allowed: boolean; reason?: string; checkedAt: number }>();
+const ROOM_ACCESS_CACHE_TTL_MS = 60000;
+const peerPreviewCache = new Map<
+  string,
+  {
+    display_name: string;
+    profile_pic: string;
+    is_vip: boolean;
+    last_active?: string;
+    cachedAt: number;
+  }
+>();
+
+export function invalidateRoomAccessCache(ghA?: string, ghB?: string): void {
+  if (ghA && ghB) {
+    roomAccessCache.delete(getSortedRoomCode(ghA, ghB));
+    return;
+  }
+  roomAccessCache.clear();
+}
+
 function readLocalPersonalChat(roomCode: string): LocalPersonalChatData | null {
+  const mem = personalChatMemoryCache.get(roomCode);
+  if (mem) return mem;
   try {
     const raw = localStorage.getItem(`${STORAGE_PERSONAL_CHAT_PREFIX}${roomCode}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as LocalPersonalChatData;
     if (!parsed || typeof parsed !== 'object') return null;
-    return {
+    const normalized: LocalPersonalChatData = {
       room_code: parsed.room_code || roomCode,
       participants: Array.isArray(parsed.participants) ? parsed.participants : [],
       messages: Array.isArray(parsed.messages) ? parsed.messages : [],
@@ -1313,12 +1358,26 @@ function readLocalPersonalChat(roomCode: string): LocalPersonalChatData | null {
         parsed.expires_at || new Date(Date.now() + TWENTY_FOUR_HOURS_MS).toISOString(),
       last_active: parsed.last_active || new Date().toISOString(),
     };
+    personalChatMemoryCache.set(roomCode, normalized);
+    return normalized;
   } catch {
     return null;
   }
 }
 
+export function getCachedPersonalChat(
+  myGhostNumber: string,
+  peerGhostNumber: string
+): ChatRoomRow | null {
+  const myGh = normalizeGhostNumber(myGhostNumber);
+  const peerGh = normalizeGhostNumber(peerGhostNumber);
+  if (!myGh || !peerGh) return null;
+  const roomCode = getSortedRoomCode(myGh, peerGh);
+  return readLocalPersonalChat(roomCode);
+}
+
 function writeLocalPersonalChat(room: LocalPersonalChatData): void {
+  personalChatMemoryCache.set(room.room_code, room);
   try {
     localStorage.setItem(`${STORAGE_PERSONAL_CHAT_PREFIX}${room.room_code}`, JSON.stringify(room));
     const idxRaw = localStorage.getItem(STORAGE_PERSONAL_ROOMS_INDEX);
@@ -1333,6 +1392,8 @@ function writeLocalPersonalChat(room: LocalPersonalChatData): void {
 }
 
 function removeLocalPersonalChat(roomCode: string): void {
+  personalChatMemoryCache.delete(roomCode);
+  roomAccessCache.delete(roomCode);
   try {
     localStorage.removeItem(`${STORAGE_PERSONAL_CHAT_PREFIX}${roomCode}`);
     const idxRaw = localStorage.getItem(STORAGE_PERSONAL_ROOMS_INDEX);
@@ -1370,32 +1431,124 @@ function mergeChatMessages(a: ChatMessage[], b: ChatMessage[]): ChatMessage[] {
   );
 }
 
-const activePersonalChannels = new Map<string, ReturnType<typeof supabase.channel>>();
+type RealtimeChannelType = ReturnType<typeof supabase.channel>;
+const activePersonalChannels = new Map<string, { channel: RealtimeChannelType; ready: boolean }>();
+const warmOutboundChannels = new Map<
+  string,
+  { channel: RealtimeChannelType; ready: boolean; waiting: Array<() => void> }
+>();
+const chatActivityListeners = new Set<(roomCode: string, room: LocalPersonalChatData) => void>();
+
+export function subscribeToPersonalChatActivity(
+  listener: (roomCode: string, room: LocalPersonalChatData) => void
+): () => void {
+  chatActivityListeners.add(listener);
+  return () => {
+    chatActivityListeners.delete(listener);
+  };
+}
+
+function notifyPersonalChatActivity(roomCode: string, room: LocalPersonalChatData): void {
+  chatActivityListeners.forEach((fn) => {
+    try {
+      fn(roomCode, room);
+    } catch {}
+  });
+}
+
+function getOrWarmOutboundChannel(channelTopic: string): {
+  channel: RealtimeChannelType;
+  sendWhenReady: (event: string, payload: any) => void;
+} {
+  let entry = warmOutboundChannels.get(channelTopic);
+  if (!entry) {
+    const ch = supabase.channel(channelTopic, {
+      config: { broadcast: { self: false, ack: false } },
+    });
+    entry = { channel: ch, ready: false, waiting: [] };
+    warmOutboundChannels.set(channelTopic, entry);
+    ch.subscribe((status) => {
+      const current = warmOutboundChannels.get(channelTopic);
+      if (!current || current.channel !== ch) return;
+      if (status === 'SUBSCRIBED') {
+        current.ready = true;
+        const flushed = current.waiting.splice(0, current.waiting.length);
+        flushed.forEach((fn) => fn());
+      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        current.ready = false;
+      }
+    });
+  }
+
+  return {
+    channel: entry.channel,
+    sendWhenReady: (event: string, payload: any) => {
+      const current = warmOutboundChannels.get(channelTopic);
+      if (!current) return;
+      const fire = () => {
+        current.channel.send({ type: 'broadcast', event, payload }).catch(() => {});
+      };
+      if (current.ready) {
+        fire();
+      } else {
+        current.waiting.push(fire);
+      }
+    },
+  };
+}
+
+export function warmChatChannels(myGhostNumber: string, peerGhostNumber: string): void {
+  const myGh = normalizeGhostNumber(myGhostNumber);
+  const peerGh = normalizeGhostNumber(peerGhostNumber);
+  if (!myGh || !peerGh) return;
+  getOrWarmOutboundChannel(`user_inbox_${peerGh}`);
+}
 
 function broadcastPersonalChatEvent(
   roomCode: string,
   event: 'personal_msg' | 'personal_delete',
-  payload: any
+  payload: any,
+  peerGh?: string
 ): void {
   try {
-    const ch = activePersonalChannels.get(roomCode);
-    if (ch) {
-      ch.send({ type: 'broadcast', event, payload }).catch(() => {});
-      return;
+    // 1. Broadcast directly to room channel (active when peer has thread open)
+    const activeRoom = activePersonalChannels.get(roomCode);
+    if (activeRoom && activeRoom.ready) {
+      activeRoom.channel.send({ type: 'broadcast', event, payload }).catch(() => {});
+    } else {
+      getOrWarmOutboundChannel(`personal_chat_${roomCode}`).sendWhenReady(event, payload);
     }
-    const temp = supabase.channel(`personal_chat_${roomCode}`, {
-      config: { broadcast: { self: false } },
-    });
-    temp.subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        temp
-          .send({ type: 'broadcast', event, payload })
-          .finally(() => {
-            setTimeout(() => supabase.removeChannel(temp), 400);
-          });
-      }
-    });
+
+    // 2. Simultaneously broadcast to peer's global inbox channel (instant even when peer is on Chats list or another tab)
+    const normalizedPeer = normalizeGhostNumber(peerGh);
+    if (normalizedPeer) {
+      getOrWarmOutboundChannel(`user_inbox_${normalizedPeer}`).sendWhenReady(event, payload);
+    }
   } catch {}
+}
+
+async function verifyRoomAccessUncached(myGh: string, peerGh: string): Promise<void> {
+  const roomCode = getSortedRoomCode(myGh, peerGh);
+  if (await isEitherUserBlocked(myGh, peerGh)) {
+    roomAccessCache.set(roomCode, {
+      allowed: false,
+      reason: 'This chat is unavailable because a user is blocked.',
+      checkedAt: Date.now(),
+    });
+    throw new Error('This chat is unavailable because a user is blocked.');
+  }
+
+  const friendsConfirmed = await areUsersFriends(myGh, peerGh);
+  if (!friendsConfirmed) {
+    roomAccessCache.set(roomCode, {
+      allowed: false,
+      reason: 'Friend request must be accepted before chatting.',
+      checkedAt: Date.now(),
+    });
+    throw new Error('Friend request must be accepted before chatting.');
+  }
+
+  roomAccessCache.set(roomCode, { allowed: true, checkedAt: Date.now() });
 }
 
 export async function openOrCreateChatRoom(
@@ -1407,18 +1560,20 @@ export async function openOrCreateChatRoom(
   if (!myGh || !peerGh) throw new Error('Invalid GH-XXXX number.');
   if (myGh === peerGh) throw new Error('Cannot open a chat with your own GH-Number.');
 
-  if (await isEitherUserBlocked(myGh, peerGh)) {
-    throw new Error('This chat is unavailable because a user is blocked.');
-  }
-
-  const friendsConfirmed = await areUsersFriends(myGh, peerGh);
-  if (!friendsConfirmed) {
-    throw new Error('Friend request must be accepted before chatting.');
-  }
-
   const roomCode = getSortedRoomCode(myGh, peerGh);
   const existing = readLocalPersonalChat(roomCode);
+  const cachedAccess = roomAccessCache.get(roomCode);
+  const accessFresh =
+    cachedAccess && Date.now() - cachedAccess.checkedAt < ROOM_ACCESS_CACHE_TTL_MS;
+
   if (existing) {
+    if (cachedAccess && !cachedAccess.allowed && accessFresh) {
+      throw new Error(cachedAccess.reason || 'Chat unavailable.');
+    }
+    if (!accessFresh) {
+      // Background verify without blocking instant room display
+      verifyRoomAccessUncached(myGh, peerGh).catch(() => {});
+    }
     const participants =
       existing.participants.length > 0 ? existing.participants : [myGh, peerGh].sort();
     return {
@@ -1429,6 +1584,12 @@ export async function openOrCreateChatRoom(
       expires_at: existing.expires_at,
       last_active: existing.last_active,
     };
+  }
+
+  if (!accessFresh) {
+    await verifyRoomAccessUncached(myGh, peerGh);
+  } else if (!cachedAccess?.allowed) {
+    throw new Error(cachedAccess?.reason || 'Chat unavailable.');
   }
 
   const nowIso = new Date().toISOString();
@@ -1457,7 +1618,17 @@ export async function sendChatMessage(params: {
   const peerGh = normalizeGhostNumber(params.peerGhostNumber);
   const roomCode = getSortedRoomCode(myGh, peerGh);
 
-  const current = await openOrCreateChatRoom(myGh, peerGh);
+  // Fast-path: use RAM/localStorage room immediately so message sends with 0 network wait!
+  let current = readLocalPersonalChat(roomCode);
+  if (!current) {
+    current = await openOrCreateChatRoom(myGh, peerGh);
+  } else {
+    const cachedAccess = roomAccessCache.get(roomCode);
+    if (cachedAccess && !cachedAccess.allowed && Date.now() - cachedAccess.checkedAt < ROOM_ACCESS_CACHE_TTL_MS) {
+      throw new Error(cachedAccess.reason || 'Chat unavailable.');
+    }
+  }
+
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
 
@@ -1487,7 +1658,8 @@ export async function sendChatMessage(params: {
     last_active: nowIso,
   };
   writeLocalPersonalChat(nextRoom);
-  broadcastPersonalChatEvent(roomCode, 'personal_msg', msg);
+  broadcastPersonalChatEvent(roomCode, 'personal_msg', msg, peerGh);
+  notifyPersonalChatActivity(roomCode, nextRoom);
 
   return nextRoom;
 }
@@ -1545,24 +1717,34 @@ export async function deleteChatMessage(params: {
     last_active: nowIso,
   };
   writeLocalPersonalChat(nextRoom);
+  notifyPersonalChatActivity(roomCode, nextRoom);
 
   if (params.mode === 'everyone' && updatedTargetMsg) {
-    broadcastPersonalChatEvent(roomCode, 'personal_delete', {
-      messageId: params.messageId,
-      message: updatedTargetMsg,
-    });
+    broadcastPersonalChatEvent(
+      roomCode,
+      'personal_delete',
+      {
+        roomCode,
+        messageId: params.messageId,
+        message: updatedTargetMsg,
+      },
+      peerGh
+    );
   }
 
   return nextRoom;
 }
 
-export async function fetchMyChatConversations(myGhostNumber: string): Promise<ConversationPreview[]> {
-  const myGh = normalizeGhostNumber(myGhostNumber);
-  if (!myGh) return [];
-
-  const myProfile = await fetchGhostProfile(myGh);
-  const blockedSet = new Set<string>(myProfile?.blocked_users || []);
-
+function readLocalConversationRawItems(
+  myGh: string,
+  blockedSet: Set<string>
+): Array<{
+  roomCode: string;
+  peerGh: string;
+  lastMessage: string;
+  lastTimestamp: string;
+  expiresAt: string;
+}> {
   const byRoomCode = new Map<
     string,
     {
@@ -1598,9 +1780,6 @@ export async function fetchMyChatConversations(myGhostNumber: string): Promise<C
         (m) => !Array.isArray(m.deleted_for) || !m.deleted_for.includes(myGh)
       );
       const last = visibleMessages[visibleMessages.length - 1];
-      if (!last && visibleMessages.length === 0 && localRoom.messages.length === 0) {
-        // Still show room if locally opened with accepted peer
-      }
       byRoomCode.set(rc, {
         roomCode: rc,
         peerGh,
@@ -1611,36 +1790,84 @@ export async function fetchMyChatConversations(myGhostNumber: string): Promise<C
     }
   } catch {}
 
-  const items = Array.from(byRoomCode.values()).sort(
+  return Array.from(byRoomCode.values()).sort(
     (a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime()
   );
+}
+
+export function getLocalChatConversationsFast(myGhostNumber: string): ConversationPreview[] {
+  const myGh = normalizeGhostNumber(myGhostNumber);
+  if (!myGh) return [];
+  const cachedMe = ghostProfileCache.get(myGh)?.profile || getCachedGhostProfile();
+  const blockedSet = new Set<string>(cachedMe?.blocked_users || []);
+  const items = readLocalConversationRawItems(myGh, blockedSet);
+  return items.map((item) => {
+    const cachedPeer = peerPreviewCache.get(item.peerGh);
+    return {
+      room_code: item.roomCode,
+      peer_ghost_number: item.peerGh,
+      peer_name: cachedPeer?.display_name || item.peerGh,
+      peer_pic: cachedPeer?.profile_pic || '',
+      peer_is_vip: cachedPeer?.is_vip || false,
+      peer_last_active: cachedPeer?.last_active,
+      last_message: item.lastMessage,
+      last_timestamp: item.lastTimestamp,
+      expires_at: item.expiresAt,
+    };
+  });
+}
+
+export async function fetchMyChatConversations(myGhostNumber: string): Promise<ConversationPreview[]> {
+  const myGh = normalizeGhostNumber(myGhostNumber);
+  if (!myGh) return [];
+
+  const myProfile = await fetchGhostProfile(myGh);
+  const blockedSet = new Set<string>(myProfile?.blocked_users || []);
+  const items = readLocalConversationRawItems(myGh, blockedSet);
 
   const peerNumbers = Array.from(new Set(items.map((i) => i.peerGh).filter(Boolean)));
   const peerProfiles: Record<string, GhostRoomProfile> = {};
+  const vipMap: Record<string, VipStatusSummary> = {};
+
   if (peerNumbers.length > 0) {
-    const { data: profiles } = await supabase
-      .from('ghosted_room')
-      .select('ghost_number, display_name, profile_pic, location, game_data, last_active')
-      .in('ghost_number', peerNumbers);
-    if (Array.isArray(profiles)) {
-      profiles.forEach((p: any) => {
+    const [profRes, vipRes] = await Promise.all([
+      supabase
+        .from('ghosted_room')
+        .select('ghost_number, display_name, profile_pic, location, game_data, last_active')
+        .in('ghost_number', peerNumbers),
+      fetchVipStatusMap(peerNumbers),
+    ]);
+    if (Array.isArray(profRes.data)) {
+      profRes.data.forEach((p: any) => {
         peerProfiles[p.ghost_number] = mapProfileRow(p);
       });
     }
+    Object.assign(vipMap, vipRes);
   }
-
-  const vipMap = peerNumbers.length > 0 ? await fetchVipStatusMap(peerNumbers) : {};
 
   return items.map((item) => {
     const peerProfile = peerProfiles[item.peerGh];
     const peerVip = vipMap[item.peerGh];
+    const isVip = peerVip ? peerVip.is_vip : Boolean(peerProfile?.is_vip);
+    const displayName = peerProfile?.display_name || item.peerGh;
+    const pic = peerProfile?.profile_pic || '';
+
+    if (peerProfile) {
+      peerPreviewCache.set(item.peerGh, {
+        display_name: displayName,
+        profile_pic: pic,
+        is_vip: isVip,
+        last_active: peerProfile.last_active,
+        cachedAt: Date.now(),
+      });
+    }
 
     return {
       room_code: item.roomCode,
       peer_ghost_number: item.peerGh,
-      peer_name: peerProfile?.display_name || item.peerGh,
-      peer_pic: peerProfile?.profile_pic || '',
-      peer_is_vip: peerVip ? peerVip.is_vip : Boolean(peerProfile?.is_vip),
+      peer_name: displayName,
+      peer_pic: pic,
+      peer_is_vip: isVip,
       peer_last_active: peerProfile?.last_active,
       last_message: item.lastMessage,
       last_timestamp: item.lastTimestamp,
@@ -1653,56 +1880,122 @@ function makeUniqueChannelName(base: string): string {
   return `${base}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function applyIncomingBroadcastMsg(roomCode: string, msg: ChatMessage): LocalPersonalChatData {
+  const current = readLocalPersonalChat(roomCode) || {
+    room_code: roomCode,
+    participants: [msg.from, msg.to].filter(Boolean).sort(),
+    messages: [],
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + TWENTY_FOUR_HOURS_MS).toISOString(),
+    last_active: new Date().toISOString(),
+  };
+  const merged = mergeChatMessages(current.messages, [msg]).slice(-200);
+  const updated: LocalPersonalChatData = {
+    ...current,
+    messages: merged,
+    last_active: msg.timestamp || new Date().toISOString(),
+  };
+  writeLocalPersonalChat(updated);
+  notifyPersonalChatActivity(roomCode, updated);
+  return updated;
+}
+
+function applyIncomingBroadcastDelete(
+  roomCode: string,
+  messageId: string,
+  replacement: ChatMessage
+): LocalPersonalChatData | null {
+  const current = readLocalPersonalChat(roomCode);
+  if (!current) return null;
+  const updated: LocalPersonalChatData = {
+    ...current,
+    messages: current.messages.map((m) => (m.id === messageId ? replacement : m)),
+    last_active: new Date().toISOString(),
+  };
+  writeLocalPersonalChat(updated);
+  notifyPersonalChatActivity(roomCode, updated);
+  return updated;
+}
+
 export function subscribeToChatRoom(
   roomCode: string,
   onUpdate: (room: ChatRoomRow | null) => void
 ): () => void {
+  const entry = { channel: null as any, ready: false };
   const channel = supabase
     .channel(`personal_chat_${roomCode}`, {
-      config: { broadcast: { self: false } },
+      config: { broadcast: { self: false, ack: false } },
     })
     .on('broadcast', { event: 'personal_msg' }, ({ payload }) => {
       const msg = payload as ChatMessage;
       if (!msg || !msg.id) return;
-      const current = readLocalPersonalChat(roomCode) || {
-        room_code: roomCode,
-        participants: [msg.from, msg.to].filter(Boolean).sort(),
-        messages: [],
-        created_at: new Date().toISOString(),
-        expires_at: new Date(Date.now() + TWENTY_FOUR_HOURS_MS).toISOString(),
-        last_active: new Date().toISOString(),
-      };
-      const merged = mergeChatMessages(current.messages, [msg]).slice(-200);
-      const updated: LocalPersonalChatData = {
-        ...current,
-        messages: merged,
-        last_active: msg.timestamp || new Date().toISOString(),
-      };
-      writeLocalPersonalChat(updated);
+      const updated = applyIncomingBroadcastMsg(roomCode, msg);
       onUpdate(updated);
     })
     .on('broadcast', { event: 'personal_delete' }, ({ payload }) => {
       const messageId = payload?.messageId as string | undefined;
       const replacement = payload?.message as ChatMessage | undefined;
       if (!messageId || !replacement) return;
-      const current = readLocalPersonalChat(roomCode);
-      if (!current) return;
-      const updated: LocalPersonalChatData = {
-        ...current,
-        messages: current.messages.map((m) => (m.id === messageId ? replacement : m)),
-        last_active: new Date().toISOString(),
-      };
-      writeLocalPersonalChat(updated);
+      const updated = applyIncomingBroadcastDelete(roomCode, messageId, replacement);
+      if (updated) onUpdate(updated);
+    })
+    .subscribe((status) => {
+      entry.ready = status === 'SUBSCRIBED';
+    });
+
+  entry.channel = channel;
+  activePersonalChannels.set(roomCode, entry);
+
+  // Also forward any message received via global user inbox for this roomCode!
+  const unsubActivity = subscribeToPersonalChatActivity((changedRoom, updated) => {
+    if (changedRoom === roomCode) {
       onUpdate(updated);
+    }
+  });
+
+  return () => {
+    unsubActivity();
+    if (activePersonalChannels.get(roomCode)?.channel === channel) {
+      activePersonalChannels.delete(roomCode);
+    }
+    supabase.removeChannel(channel);
+  };
+}
+
+export function subscribeToUserInbox(
+  myGhostNumber: string,
+  onIncomingMessage?: (msg: ChatMessage, room: ChatRoomRow) => void
+): () => void {
+  const myGh = normalizeGhostNumber(myGhostNumber);
+  if (!myGh) return () => {};
+
+  const channel = supabase
+    .channel(`user_inbox_${myGh}`, {
+      config: { broadcast: { self: false, ack: false } },
+    })
+    .on('broadcast', { event: 'personal_msg' }, ({ payload }) => {
+      const msg = payload as ChatMessage;
+      if (!msg || !msg.id || !msg.from) return;
+      const peerGh = normalizeGhostNumber(msg.from) === myGh ? normalizeGhostNumber(msg.to) : normalizeGhostNumber(msg.from);
+      if (!peerGh) return;
+      const roomCode = getSortedRoomCode(myGh, peerGh);
+      const updated = applyIncomingBroadcastMsg(roomCode, msg);
+      onIncomingMessage?.(msg, updated);
+    })
+    .on('broadcast', { event: 'personal_delete' }, ({ payload }) => {
+      const messageId = payload?.messageId as string | undefined;
+      const replacement = payload?.message as ChatMessage | undefined;
+      const roomCode =
+        (payload?.roomCode as string | undefined) ||
+        (replacement?.from && replacement?.to
+          ? getSortedRoomCode(replacement.from, replacement.to)
+          : '');
+      if (!messageId || !replacement || !roomCode) return;
+      applyIncomingBroadcastDelete(roomCode, messageId, replacement);
     })
     .subscribe();
 
-  activePersonalChannels.set(roomCode, channel);
-
   return () => {
-    if (activePersonalChannels.get(roomCode) === channel) {
-      activePersonalChannels.delete(roomCode);
-    }
     supabase.removeChannel(channel);
   };
 }
@@ -3320,7 +3613,7 @@ export async function purchaseVipSubscription(params: {
   const gh = normalizeGhostNumber(params.ghostNumber);
   if (!gh) throw new Error('Invalid GH-XXXX number.');
 
-  const res = await fetch('/api/verify-paystack', {
+  const res = await fetch(apiUrl('/api/verify-paystack'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -3371,7 +3664,7 @@ export async function purchaseVipGameSingle(params: {
   const purchaseType =
     params.gameSlot === 1 ? 'vip_game_1' : params.gameSlot === 2 ? 'vip_game_2' : 'vip_games';
 
-  const res = await fetch('/api/verify-paystack', {
+  const res = await fetch(apiUrl('/api/verify-paystack'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -3428,7 +3721,7 @@ export async function grantOneHourVipTrial(
 
   const resolvedEmail = email || getCachedGhostProfile()?.email || '';
   try {
-    const res = await fetch('/api/vip/activate-trial', {
+    const res = await fetch(apiUrl('/api/vip/activate-trial'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ghostNumber: gh, email: resolvedEmail }),
@@ -3833,6 +4126,9 @@ export async function blockContactUser(myGhRaw: string, peerGhRaw: string): Prom
       .eq('ghost_number', peerGh);
   }
 
+  invalidateGhostProfileCache(myGh);
+  invalidateGhostProfileCache(peerGh);
+  invalidateRoomAccessCache(myGh, peerGh);
   // 3. Delete FRIENDREQ::, CHAT::, and MAP:: rows (+ chats/messages tables) for this blocked pair
   try {
     removeLocalPersonalChat(roomCode);
@@ -3925,6 +4221,9 @@ export async function deleteContactUser(myGhRaw: string, peerGhRaw: string): Pro
   try {
     removeLocalPersonalChat(roomCode);
   } catch {}
+  invalidateGhostProfileCache(myGh);
+  invalidateGhostProfileCache(peerGh);
+  invalidateRoomAccessCache(myGh, peerGh);
   try {
     await supabase
       .from('ghosted_room')
@@ -4069,6 +4368,7 @@ export async function respondToFriendRequest(params: {
   }
 
   await syncFriendRequestIntoUserRows(updatedRecord);
+  invalidateRoomAccessCache(senderGh, responderGh);
   return updatedRecord;
 }
 
@@ -4276,16 +4576,154 @@ function mapIdeaTableRow(row: any): IdeaRecord {
 function mapIdeaGhostRoomRow(row: any): IdeaRecord {
   const gd = row?.game_data && typeof row.game_data === 'object' ? row.game_data : {};
   const createdAt = gd.created_at || row.last_active || new Date().toISOString();
+  const likedBy: string[] = Array.isArray(gd.liked_by)
+    ? Array.from(
+        new Set(
+          gd.liked_by.map((g: any) => normalizeGhostNumber(g)).filter(Boolean)
+        )
+      )
+    : [];
+  const rawLikes = typeof gd.likes === 'number' ? gd.likes : Number(gd.likes || 0);
   return {
     id: String(gd.id || row.ghost_number),
     ghost_number:
       normalizeGhostNumber(gd.ghost_number || row.room_code) ||
       String(gd.ghost_number || row.room_code || 'GH-0000'),
     text: String(gd.text || row.display_name || ''),
-    likes: typeof gd.likes === 'number' ? gd.likes : Number(gd.likes || 0),
+    likes: Math.max(rawLikes, likedBy.length),
+    liked_by: likedBy,
     created_at: createdAt,
     expires_at: computeIdeaExpiresAt(createdAt, gd.expires_at),
   };
+}
+
+async function syncIdeaToGhostedNumberRoom(idea: IdeaRecord): Promise<void> {
+  const ownerGh = normalizeGhostNumber(idea.ghost_number);
+  if (!ownerGh) return;
+  try {
+    const { data: gnRows } = await supabase
+      .from('ghosted_room')
+      .select('ghost_number, game_data')
+      .like('ghost_number', `${GNROOM_PREFIX}%`)
+      .eq('room_code', ownerGh)
+      .limit(3);
+
+    const activeRow = Array.isArray(gnRows)
+      ? gnRows.find((r: any) => String(r?.game_data?.status || '').toLowerCase() !== 'deleted')
+      : null;
+
+    if (!activeRow) return;
+
+    const gd =
+      activeRow.game_data && typeof activeRow.game_data === 'object' ? activeRow.game_data : {};
+    const prevIdeas: IdeaRecord[] = Array.isArray(gd.ideas) ? gd.ideas : [];
+    const freshPrev = prevIdeas.filter(
+      (item) => item?.id && item.id !== idea.id && !isExpired24h(item.expires_at, item.created_at)
+    );
+    const nextIdeas = [idea, ...freshPrev]
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, 100);
+
+    await supabase
+      .from('ghosted_room')
+      .update({
+        game_data: {
+          ...gd,
+          kind: 'ghosted_number_room',
+          ideas: nextIdeas,
+          updated_at: new Date().toISOString(),
+        },
+        last_active: new Date().toISOString(),
+      })
+      .eq('ghost_number', activeRow.ghost_number);
+  } catch {}
+}
+
+async function syncLikerIdeaToGhostedNumberRoom(likerGhRaw: string, ideaId: string): Promise<void> {
+  const likerGh = normalizeGhostNumber(likerGhRaw);
+  if (!likerGh || !ideaId) return;
+  try {
+    const { data: gnRows } = await supabase
+      .from('ghosted_room')
+      .select('ghost_number, game_data')
+      .like('ghost_number', `${GNROOM_PREFIX}%`)
+      .eq('room_code', likerGh)
+      .limit(3);
+
+    const activeRow = Array.isArray(gnRows)
+      ? gnRows.find((r: any) => String(r?.game_data?.status || '').toLowerCase() !== 'deleted')
+      : null;
+
+    if (!activeRow) return;
+
+    const gd =
+      activeRow.game_data && typeof activeRow.game_data === 'object' ? activeRow.game_data : {};
+    const prevIds: string[] = Array.isArray(gd.liked_idea_ids) ? gd.liked_idea_ids : [];
+    if (prevIds.includes(ideaId)) return;
+
+    const nextIds = [...prevIds, ideaId].slice(-200);
+    await supabase
+      .from('ghosted_room')
+      .update({
+        game_data: {
+          ...gd,
+          kind: 'ghosted_number_room',
+          liked_idea_ids: nextIds,
+          updated_at: new Date().toISOString(),
+        },
+      })
+      .eq('ghost_number', activeRow.ghost_number);
+  } catch {}
+}
+
+async function pruneExpiredIdeasFromGhostedNumberRoom(expiredIdeas: IdeaRecord[]): Promise<void> {
+  if (!expiredIdeas.length) return;
+  const expiredByOwner = new Map<string, Set<string>>();
+  expiredIdeas.forEach((idea) => {
+    const ownerGh = normalizeGhostNumber(idea.ghost_number);
+    if (!ownerGh) return;
+    if (!expiredByOwner.has(ownerGh)) expiredByOwner.set(ownerGh, new Set());
+    expiredByOwner.get(ownerGh)!.add(idea.id);
+  });
+
+  for (const [ownerGh, expiredIdSet] of expiredByOwner.entries()) {
+    try {
+      const { data: gnRows } = await supabase
+        .from('ghosted_room')
+        .select('ghost_number, game_data')
+        .like('ghost_number', `${GNROOM_PREFIX}%`)
+        .eq('room_code', ownerGh)
+        .limit(3);
+
+      const activeRow = Array.isArray(gnRows)
+        ? gnRows.find((r: any) => String(r?.game_data?.status || '').toLowerCase() !== 'deleted')
+        : null;
+      if (!activeRow) continue;
+
+      const gd =
+        activeRow.game_data && typeof activeRow.game_data === 'object' ? activeRow.game_data : {};
+      const prevIdeas: IdeaRecord[] = Array.isArray(gd.ideas) ? gd.ideas : [];
+      const keptIdeas = prevIdeas.filter(
+        (item) =>
+          item?.id &&
+          !expiredIdSet.has(item.id) &&
+          !isExpired24h(item.expires_at, item.created_at)
+      );
+      if (keptIdeas.length !== prevIdeas.length) {
+        await supabase
+          .from('ghosted_room')
+          .update({
+            game_data: {
+              ...gd,
+              kind: 'ghosted_number_room',
+              ideas: keptIdeas,
+              updated_at: new Date().toISOString(),
+            },
+          })
+          .eq('ghost_number', activeRow.ghost_number);
+      }
+    } catch {}
+  }
 }
 
 export async function loadIdeas(): Promise<IdeaRecord[]> {
@@ -4348,11 +4786,13 @@ export async function loadIdeas(): Promise<IdeaRecord[]> {
 
   const freshIdeas: IdeaRecord[] = [];
   const expiredKeys: string[] = [];
+  const expiredIdeas: IdeaRecord[] = [];
 
   grRows.forEach((row: any) => {
     const mapped = mapIdeaGhostRoomRow(row);
     if (isExpired24h(mapped.expires_at, mapped.created_at)) {
       expiredKeys.push(String(row.ghost_number));
+      expiredIdeas.push(mapped);
     } else {
       freshIdeas.push(mapped);
     }
@@ -4362,6 +4802,7 @@ export async function loadIdeas(): Promise<IdeaRecord[]> {
     try {
       await supabase.from('ghosted_room').delete().in('ghost_number', expiredKeys);
     } catch {}
+    pruneExpiredIdeasFromGhostedNumberRoom(expiredIdeas).catch(() => {});
   }
 
   return freshIdeas.sort(
@@ -4429,6 +4870,7 @@ export async function postIdea(
         ghost_number: ghostNumber,
         text,
         likes: 0,
+        liked_by: [],
         created_at: nowIso,
         expires_at: expiresAtIso,
       },
@@ -4440,30 +4882,24 @@ export async function postIdea(
   if (grErr) {
     throw new Error(grErr.message || 'Could not save idea in Supabase.');
   }
-  return mapIdeaGhostRoomRow(grData);
+  const mappedIdea = mapIdeaGhostRoomRow(grData);
+  await syncIdeaToGhostedNumberRoom(mappedIdea);
+  return mappedIdea;
 }
 
 export async function likeIdea(
   ideaId: string,
-  currentLikes: number
+  _currentLikes: number,
+  likerGhostNumber?: string
 ): Promise<IdeaRecord | null> {
-  const nextLikes = Math.max(0, Number(currentLikes || 0)) + 1;
-
-  if (!ideasTableMissing && !String(ideaId).startsWith(IDEA_PREFIX)) {
-    const { data, error } = await supabase
-      .from('ideas')
-      .update({ likes: nextLikes })
-      .eq('id', ideaId)
-      .select();
-
-    if (!error && Array.isArray(data) && data[0]) {
-      return mapIdeaTableRow(data[0]);
-    }
-    if (error && isMissingIdeasTableError(error)) {
-      ideasTableMissing = true;
-    } else if (error) {
-      throw new Error(error.message || 'Could not like idea.');
-    }
+  const storedGh =
+    typeof localStorage !== 'undefined' ? localStorage.getItem('ghost_number') : '';
+  const likerGh =
+    normalizeGhostNumber(likerGhostNumber) ||
+    normalizeGhostNumber(storedGh) ||
+    getSavedGhostNumber();
+  if (!likerGh) {
+    throw new Error('Sign in with a GH-Number to like an idea.');
   }
 
   const { data: existing, error: fetchErr } = await supabase
@@ -4475,10 +4911,26 @@ export async function likeIdea(
   if (fetchErr || !existing) return null;
 
   const gd = existing.game_data && typeof existing.game_data === 'object' ? existing.game_data : {};
-  const latestLikes = Math.max(
-    nextLikes,
-    (typeof gd.likes === 'number' ? gd.likes : Number(gd.likes || 0)) + 1
-  );
+  const ownerGh = normalizeGhostNumber(gd.ghost_number || existing.room_code);
+  if (ownerGh && ownerGh === likerGh) {
+    throw new Error('You cannot like your own idea.');
+  }
+
+  const prevLikedBy: string[] = Array.isArray(gd.liked_by)
+    ? Array.from(
+        new Set(
+          gd.liked_by.map((g: any) => normalizeGhostNumber(g)).filter(Boolean)
+        )
+      )
+    : [];
+
+  if (prevLikedBy.includes(likerGh)) {
+    throw new Error('You already liked this idea.');
+  }
+
+  const nextLikedBy = [...prevLikedBy, likerGh];
+  const prevLikes = typeof gd.likes === 'number' ? gd.likes : Number(gd.likes || 0);
+  const latestLikes = Math.max(prevLikes + 1, nextLikedBy.length);
 
   const { data: updated, error: updateErr } = await supabase
     .from('ghosted_room')
@@ -4487,6 +4939,7 @@ export async function likeIdea(
         ...gd,
         kind: 'idea',
         likes: latestLikes,
+        liked_by: nextLikedBy,
       },
     })
     .eq('ghost_number', String(ideaId))
@@ -4496,7 +4949,12 @@ export async function likeIdea(
   if (updateErr) {
     throw new Error(updateErr.message || 'Could not like idea.');
   }
-  return mapIdeaGhostRoomRow(updated);
+  const updatedIdea = mapIdeaGhostRoomRow(updated);
+  await Promise.all([
+    syncIdeaToGhostedNumberRoom(updatedIdea),
+    syncLikerIdeaToGhostedNumberRoom(likerGh, updatedIdea.id),
+  ]);
+  return updatedIdea;
 }
 
 export function subscribeToIdeas(onUpdate: () => void): () => void {
