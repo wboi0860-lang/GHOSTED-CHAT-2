@@ -30,7 +30,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           EOF
       - name: Build web
-        run: npm run build || true
+        run: npm run build
       - name: Build Debug APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
