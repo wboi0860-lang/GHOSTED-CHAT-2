@@ -15,8 +15,6 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
       - name: Install Node
         uses: actions/setup-node@v4
         with:
@@ -26,9 +24,12 @@ jobs:
       - name: Build web
         run: npm run build || true
       - name: Build Debug APK
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: |
-          chmod +x gradlew || true
-          ./gradlew assembleDebug || npx cap sync android && ./gradlew assembleDebug
+          chmod +x gradlew
+          ./gradlew assembleDebug
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
