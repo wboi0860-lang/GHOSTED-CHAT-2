@@ -1,0 +1,6 @@
+{
+  "name": "Ghosted",
+  "description": "Reconnect with long-lost friends, family, and past partners safely without harassment, featuring AI safety cross-checks and consent-based delivery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

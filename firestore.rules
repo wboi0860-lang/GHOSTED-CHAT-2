@@ -1,0 +1,214 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTextIdea(data) {
+      return data.keys().hasAll([
+          'id',
+          'userId',
+          'userName',
+          'ghostNumber',
+          'text',
+          'bgColor',
+          'createdAt',
+          'expiresAt',
+          'likesCount',
+          'likedBy'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'userId',
+          'userName',
+          'ghostNumber',
+          'text',
+          'bgColor',
+          'createdAt',
+          'expiresAt',
+          'likesCount',
+          'likedBy'
+        ])
+        && data.id is string && data.id.size() > 0 && data.id.size() <= 128
+        && data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128
+        && data.userName is string && data.userName.size() > 0 && data.userName.size() <= 64
+        && data.ghostNumber is string && data.ghostNumber.size() <= 32 && data.ghostNumber.matches('^GH-[0-9]{4}-[0-9]{4}$')
+        && data.text is string && data.text.size() > 0 && data.text.size() <= 200
+        && data.bgColor is string && data.bgColor.size() > 0 && data.bgColor.size() <= 100
+        && data.createdAt is number && data.createdAt > 0
+        && data.expiresAt is number && data.expiresAt > data.createdAt
+        && data.likesCount is number && data.likesCount >= 0
+        && data.likedBy is list && data.likedBy.size() <= 500
+        && (data.likedBy.size() == 0 || data.likedBy[0] is string);
+    }
+
+    // 1. users: {name, sex, age, location, adCountToday, lastAdReset, vipStatus, vipExpiresAt}
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    // 2. friendships: {request, accept tracker logic}
+    match /friendships/{friendshipId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    // 3. ghost_tracks: {userA, userB, locationA, locationB, status: both_on, user1_ON, user2_ON}
+    match /ghost_tracks/{trackId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    // 3b. liveLocations: live location coordinates and sharing status
+    match /liveLocations/{userId} {
+      allow read, write: if true;
+    }
+
+    // 4. status: {text, bgColor, textColor, textSize, createdAt, expiresAt}
+    match /status/{statusId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    // 4b. ideas: 24-hour text-only shared ideas (Firestore-only, auto-deleted after 24h)
+    match /ideas/{ideaId} {
+      allow get: if isValidId(ideaId);
+      allow list: if resource.data.expiresAt > 0;
+      allow create: if isValidId(ideaId)
+        && isValidTextIdea(incoming())
+        && incoming().id == ideaId
+        && incoming().likesCount == 0
+        && incoming().likedBy.size() == 0;
+      allow update: if isValidId(ideaId)
+        && isValidTextIdea(incoming())
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().expiresAt == existing().expiresAt
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['likedBy', 'likesCount'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['text', 'bgColor'])
+        );
+      allow delete: if isValidId(ideaId);
+    }
+
+    // Startup connection verification doc
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    function isValidDailyLimitCount(data) {
+      return data.keys().hasAll(['userId', 'date', 'count'])
+        && data.keys().hasOnly(['userId', 'peerId', 'date', 'count', 'updatedAt'])
+        && data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128
+        && (!('peerId' in data) || (data.peerId is string && data.peerId.size() <= 64))
+        && data.date is string && data.date.size() >= 8 && data.date.size() <= 16
+        && data.count is number && data.count >= 0 && data.count <= 500;
+    }
+
+    match /daily_chat_counts/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if resource.data.date is string;
+      allow create, update: if isValidId(docId) && isValidDailyLimitCount(incoming());
+      allow delete: if false;
+    }
+
+    match /daily_call_counts/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if resource.data.date is string;
+      allow create, update: if isValidId(docId) && isValidDailyLimitCount(incoming());
+      allow delete: if false;
+    }
+
+    // 5. vip_payments: {userId, plan, amount, startDate, expiryDate, status, paymentMethod}
+    match /vip_payments/{paymentId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    // Calls & Chats are removed from Firestore (Supabase-only).
+    // Allow delete only for cleaning up legacy leftover documents; block all future creates/updates.
+    match /calls/{callId} {
+      allow read, delete: if true;
+      allow create, update: if false;
+      match /{sub=**} {
+        allow read, delete: if true;
+        allow create, update: if false;
+      }
+    }
+
+    // Feed & messaging collections for compatibility
+    match /posts/{postId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    match /videos/{videoId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    match /ghost_posts/{postId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    match /stories/{storyId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated() || true;
+    }
+
+    match /ghost_users/{id} {
+      allow read, write: if true;
+    }
+
+    match /inbox_messages/{msgId} {
+      allow read, delete: if true;
+      allow create, update: if false;
+    }
+
+    match /chat_messages/{msgId} {
+      allow read, delete: if true;
+      allow create, update: if false;
+    }
+
+    match /friend_requests/{id} {
+      allow read, write: if true;
+    }
+
+    match /friends/{id} {
+      allow read, write: if true;
+    }
+
+    match /chats/{chatId} {
+      allow read, delete: if true;
+      allow create, update: if false;
+      match /{sub=**} {
+        allow read, delete: if true;
+        allow create, update: if false;
+      }
+    }
+
+    // Catch-all (excludes chats/calls/inbox_messages/chat_messages)
+    match /{document=**} {
+      allow read: if true;
+      allow write: if isAuthenticated() || true;
+    }
+  }
+}

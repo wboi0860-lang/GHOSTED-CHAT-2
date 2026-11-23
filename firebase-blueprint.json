@@ -1,0 +1,300 @@
+{
+  "entities": {
+    "GhostUser": {
+      "title": "GhostUser",
+      "description": "Private Ghosted user account with unique ghost_name and auto-generated ghost_id.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ghost_name": { "type": "string", "maxLength": 64 },
+        "ghost_id": { "type": "string", "maxLength": 32 },
+        "password_hash": { "type": "string" },
+        "email": { "type": "string" },
+        "avatar": { "type": "string" },
+        "is_public_id": { "type": "boolean" },
+        "created_at": { "type": "string" },
+        "interests": { "type": "array" }
+      },
+      "required": ["id", "ghost_name", "ghost_id", "avatar", "is_public_id", "created_at"]
+    },
+    "CallRecord": {
+      "title": "CallRecord",
+      "description": "Real in-app Ghosted peer call session record and signaling document.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "caller_id": { "type": "string" },
+        "receiver_id": { "type": "string" },
+        "caller_name": { "type": "string" },
+        "receiver_name": { "type": "string" },
+        "type": { "type": "string", "enum": ["voice", "video"] },
+        "duration": { "type": "number" },
+        "time": { "type": "string" },
+        "status": { "type": "string", "enum": ["ringing", "connected", "ended", "missed", "declined", "timeout"] },
+        "offer": { "type": "object" },
+        "answer": { "type": "object" }
+      },
+      "required": ["caller_id", "receiver_id", "type", "time"]
+    },
+    "InboxMessage": {
+      "title": "InboxMessage",
+      "description": "Secret unknown anonymous message delivered to a real Ghosted user inbox with optional identity reveal.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sender_id_hidden": { "type": "string" },
+        "sender_name_hidden": { "type": "string" },
+        "receiver_id": { "type": "string" },
+        "receiver_name": { "type": "string" },
+        "message": { "type": "string", "maxLength": 5000 },
+        "mood": { "type": "string" },
+        "relationship": { "type": "string" },
+        "is_revealed": { "type": "boolean" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "sender_id_hidden", "receiver_id", "message", "is_revealed", "timestamp"]
+    },
+    "GhostNotification": {
+      "title": "GhostNotification",
+      "description": "Real user push notification for reveals, whispers, and incoming messages.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "type": { "type": "string", "enum": ["reveal_requested", "whisper_received", "call_missed", "chat_message"] },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "read": { "type": "boolean" }
+      },
+      "required": ["id", "user_id", "type", "title", "body", "timestamp", "read"]
+    },
+    "GhostMessage": {
+      "title": "GhostMessage",
+      "description": "Real-time encrypted chat message between Ghosted users.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "conversation_id": { "type": "string" },
+        "sender_id": { "type": "string" },
+        "receiver_id": { "type": "string" },
+        "text": { "type": "string", "maxLength": 5000 },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "sender_id", "receiver_id", "text", "timestamp"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User profile with onboarding credentials.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "fullName": { "type": "string" },
+        "displayName": { "type": "string" },
+        "age": { "type": "number" },
+        "interests": { "type": "array" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "isOnboarded": { "type": "boolean" },
+        "vipPaidViaPaystack": { "type": "boolean" },
+        "paymentProvider": { "type": "string" },
+        "paystackReference": { "type": "string" }
+      },
+      "required": ["uid", "email", "createdAt", "isOnboarded"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "Real Firestore friend request between two Ghosted users with status pending, accepted, or declined.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "from": { "type": "string" },
+        "fromGhostNumber": { "type": "string" },
+        "fromName": { "type": "string" },
+        "to": { "type": "string" },
+        "toGhostNumber": { "type": "string" },
+        "toName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "number" },
+        "acceptedAt": { "type": "number" }
+      },
+      "required": ["from", "fromGhostNumber", "to", "toGhostNumber", "status"]
+    },
+    "Friend": {
+      "title": "Friend",
+      "description": "Mutual accepted friendship record between two Ghosted users.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "friendUid": { "type": "string" },
+        "friendGhostNumber": { "type": "string" },
+        "friendName": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["userId", "friendUid", "friendGhostNumber"]
+    },
+    "LiveLocation": {
+      "title": "LiveLocation",
+      "description": "Live GPS coordinates and sharing status for a Ghosted user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "ghostedNumber": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "speed": { "type": "number" },
+        "accuracy": { "type": "number" },
+        "sharing": { "type": "boolean" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["userId", "lat", "lng"]
+    },
+    "BlockedEmail": {
+      "title": "BlockedEmail",
+      "description": "Google email permanently blocked after account deletion.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "deletedUserId": { "type": "string" },
+        "ghostNumber": { "type": "string" },
+        "blockedAt": { "type": "number" },
+        "reason": { "type": "string" }
+      },
+      "required": ["email", "blockedAt"]
+    },
+    "MapShareRequest": {
+      "title": "MapShareRequest",
+      "description": "Mutual map share invitation between two friends.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fromUid": { "type": "string" },
+        "fromGhostNumber": { "type": "string" },
+        "toUid": { "type": "string" },
+        "toGhostNumber": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined", "stopped"] }
+      },
+      "required": ["id", "fromUid", "toUid", "status"]
+    },
+    "ActiveMapShare": {
+      "title": "ActiveMapShare",
+      "description": "Active two-user map sharing session.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userA": { "type": "string" },
+        "ghostNumberA": { "type": "string" },
+        "userB": { "type": "string" },
+        "ghostNumberB": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "stopped"] }
+      },
+      "required": ["id", "userA", "userB", "status"]
+    },
+    "TextIdea": {
+      "title": "TextIdea",
+      "description": "24-hour text-only shared idea stored exclusively in Firestore.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "userName": { "type": "string", "maxLength": 64 },
+        "ghostNumber": { "type": "string", "maxLength": 32, "pattern": "^GH-\\\\d{4}-\\\\d{4}$" },
+        "text": { "type": "string", "maxLength": 200 },
+        "bgColor": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "number" },
+        "expiresAt": { "type": "number" },
+        "likesCount": { "type": "number" },
+        "likedBy": { "type": "array" }
+      },
+      "required": ["id", "userId", "userName", "ghostNumber", "text", "bgColor", "createdAt", "expiresAt", "likesCount", "likedBy"]
+    },
+    "DailyLimitCount": {
+      "title": "DailyLimitCount",
+      "description": "Per-day (and per-chat peer) daily call or chat usage counter.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "peerId": { "type": "string", "maxLength": 64 },
+        "date": { "type": "string", "maxLength": 16 },
+        "count": { "type": "number" },
+        "updatedAt": { "type": "object" }
+      },
+      "required": ["userId", "date", "count"]
+    }
+  },
+  "firestore": {
+    "/ghost_users/{id}": {
+      "schema": "GhostUser",
+      "description": "Real registered Ghosted user accounts"
+    },
+    "/calls/{callId}": {
+      "schema": "CallRecord",
+      "description": "Real in-app peer calls and signaling sessions"
+    },
+    "/calls/{callId}/callerCandidates/{candidateId}": {
+      "schema": { "$ref": "object" },
+      "description": "WebRTC ICE candidates for caller"
+    },
+    "/calls/{callId}/receiverCandidates/{candidateId}": {
+      "schema": { "$ref": "object" },
+      "description": "WebRTC ICE candidates for receiver"
+    },
+    "/inbox_messages/{id}": {
+      "schema": "InboxMessage",
+      "description": "Private anonymous messages received in Ghosted inbox"
+    },
+    "/notifications/{id}": {
+      "schema": "GhostNotification",
+      "description": "Real-time push notifications"
+    },
+    "/ghost_messages/{id}": {
+      "schema": "GhostMessage",
+      "description": "Real-time chat messages between Ghosted users"
+    },
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "Legacy and synced user profiles"
+    },
+    "/friend_requests/{id}": {
+      "schema": "FriendRequest",
+      "description": "Real-time Firestore friend requests with pending/accepted status"
+    },
+    "/friends/{id}": {
+      "schema": "Friend",
+      "description": "Accepted friends pairs for mutual tracking and chat"
+    },
+    "/liveLocations/{userId}": {
+      "schema": "LiveLocation",
+      "description": "Live GPS coordinates of online Ghosted users"
+    },
+    "/blocked_emails/{emailId}": {
+      "schema": "BlockedEmail",
+      "description": "Deleted Google emails blocked from re-creating accounts"
+    },
+    "/map_share_requests/{pairId}": {
+      "schema": "MapShareRequest",
+      "description": "Live map sharing requests between friends"
+    },
+    "/active_map_shares/{pairId}": {
+      "schema": "ActiveMapShare",
+      "description": "Active two-user map location sharing connections"
+    },
+    "/ideas/{ideaId}": {
+      "schema": "TextIdea",
+      "description": "24-hour text-only shared ideas in Firestore (automatically deleted after 24h)"
+    },
+    "/daily_chat_counts/{docId}": {
+      "schema": "DailyLimitCount",
+      "description": "Daily chat message counter per user and per peer chat"
+    },
+    "/daily_call_counts/{docId}": {
+      "schema": "DailyLimitCount",
+      "description": "Daily voice call counter per user and per peer chat"
+    }
+  }
+}
