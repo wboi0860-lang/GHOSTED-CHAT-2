@@ -1464,7 +1464,8 @@ app.post('/api/accounts/signup', async (req: Request, res: Response) => {
     }
 
     // c) Generate next sequential GH-Number (GH-1 + counter, never reuses deleted numbers)
-    const ghNumber = await generateNextFreeGhNumber();
+    const { data: ghNumber, error: ghError } = await supabaseServer.rpc('get_next_ghost_number');
+if (ghError || !ghNumber) throw new Error('Could not create GH-Number, try again');
     const nowIso = new Date().toISOString();
     const rowId =
       authUserId && /^[0-9a-f-]{36}$/i.test(authUserId) ? authUserId : crypto.randomUUID();
