@@ -22,7 +22,13 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
       - name: Setup env file
-        run: cp .env.example .env
+        run: |
+          cat > .env << 'EOF'
+          VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          EOF
       - name: Build web
         run: npm run build || true
       - name: Build Debug APK
